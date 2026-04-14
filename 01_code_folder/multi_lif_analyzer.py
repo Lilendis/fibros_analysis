@@ -12,6 +12,7 @@ import re
 from datetime import datetime
 import time
 from PIL import Image, ImageDraw, ImageFont
+from html import escape
 
 class MultiSampleLifAnalyzer:
     def __init__(self, 
@@ -87,6 +88,291 @@ class MultiSampleLifAnalyzer:
         print(f"         • Разделение скоплений: {'ВКЛ' if split_large_clusters else 'ВЫКЛ'}")
         print(f"         • Путь для IgG данных: {save_igg_data_path or 'не указан'}")
             
+    def make_safe_name(self, value, fallback="sample"):
+        """Creates a filesystem-safe name."""
+        if value is None:
+            value = ""
+
+        safe_name = "".join(c for c in str(value) if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        safe_name = safe_name.replace(" ", "_")
+        safe_name = re.sub(r"_+", "_", safe_name).strip("._")
+        return safe_name or fallback
+
+    def extract_sample_date(self, image_name):
+        """Extracts a date from the sample name or uses the current date."""
+        image_name_str = str(image_name or "")
+
+        patterns = [
+            (r'(\d{4})[-_.](\d{2})[-_.](\d{2})', lambda m: f"{m.group(1)}-{m.group(2)}-{m.group(3)}"),
+            (r'(\d{2})[-_.](\d{2})[-_.](\d{4})', lambda m: f"{m.group(3)}-{m.group(2)}-{m.group(1)}"),
+            (r'(?<!\d)(\d{8})(?!\d)', lambda m: datetime.strptime(m.group(1), "%Y%m%d").strftime("%Y-%m-%d")),
+        ]
+
+        for pattern, formatter in patterns:
+            match = re.search(pattern, image_name_str)
+            if not match:
+                continue
+            try:
+                return formatter(match)
+            except ValueError:
+                continue
+
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def get_sample_output_dir(self, gallery_root_dir, sample_data):
+        """Returns a stable directory for sample assets."""
+        sample_date = sample_data.get('sample_date', datetime.now().strftime("%Y-%m-%d"))
+        mouse_id = self.make_safe_name(sample_data.get('mouse_id', 'unknown_group'), fallback='unknown_group')
+        sample_slug = sample_data.get('sample_slug') or self.make_safe_name(sample_data.get('sample_name'), fallback='sample')
+        return os.path.join(gallery_root_dir, sample_date, mouse_id, sample_slug)
+
+    def create_html_gallery(self, gallery_root_dir, all_summaries, source_file=None):
+        """Builds a static HTML gallery with grouping by date and sample."""
+        try:
+            os.makedirs(gallery_root_dir, exist_ok=True)
+
+            grouped = {}
+            for summary in all_summaries:
+                sample_date = summary.get('sample_date', 'unknown_date')
+                mouse_id = summary.get('mouse_id', 'unknown_group')
+                grouped.setdefault(sample_date, {}).setdefault(mouse_id, []).append(summary)
+
+            date_sections = []
+            for sample_date in sorted(grouped.keys(), reverse=True):
+                group_sections = []
+                for mouse_id in sorted(grouped[sample_date].keys()):
+                    cards = []
+                    for summary in sorted(grouped[sample_date][mouse_id], key=lambda item: item.get('sample_name', '')):
+                        image_blocks = []
+                        for image_item in summary.get('gallery_images', []):
+                            rel_path = image_item.get('path')
+                            label = image_item.get('label', 'Image')
+                            if not rel_path:
+                                continue
+
+                            image_blocks.append(
+                                f"""
+                                <a class="thumb" href="{escape(rel_path)}" target="_blank" rel="noopener">
+                                  <img src="{escape(rel_path)}" alt="{escape(label)}">
+                                  <span>{escape(label)}</span>
+                                </a>
+                                """
+                            )
+
+                        csv_link = ""
+                        if summary.get('results_csv_path'):
+                            csv_link = (
+                                f'<a class="meta-link" href="{escape(summary["results_csv_path"])}" '
+                                f'target="_blank" rel="noopener">CSV</a>'
+                            )
+
+                        cards.append(
+                            f"""
+                            <article class="sample-card">
+                              <div class="sample-header">
+                                <div>
+                                  <h3>{escape(summary.get('sample_name', 'Unknown sample'))}</h3>
+                                  <p>{escape(mouse_id)} | {escape(sample_date)}</p>
+                                </div>
+                                <div class="stats">
+                                  <span>Total: {summary.get('total_vesicles', 0)}</span>
+                                  <span>In macrophages: {summary.get('colocalized_vesicles', 0)}</span>
+                                  <span>Colocalization: {summary.get('colocalization_percentage', 0):.2f}%</span>
+                                  {csv_link}
+                                </div>
+                              </div>
+                              <div class="thumb-grid">
+                                {''.join(image_blocks) if image_blocks else '<p class="empty">No images available.</p>'}
+                              </div>
+                            </article>
+                            """
+                        )
+
+                    group_sections.append(
+                        f"""
+                        <section class="group-section">
+                          <h2>{escape(mouse_id)}</h2>
+                          <div class="sample-list">
+                            {''.join(cards)}
+                          </div>
+                        </section>
+                        """
+                    )
+
+                date_sections.append(
+                    f"""
+                    <section class="date-section">
+                      <div class="date-title">
+                        <h1>{escape(sample_date)}</h1>
+                      </div>
+                      {''.join(group_sections)}
+                    </section>
+                    """
+                )
+
+            generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LIF Analysis Gallery</title>
+  <style>
+    :root {{
+      --bg: #f4efe7;
+      --card: #fffaf3;
+      --line: #d5c6b4;
+      --text: #2f2419;
+      --muted: #6d5c4b;
+      --accent: #8c4f2f;
+      --accent-soft: #e8d7c5;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, #fff7ee 0, transparent 30%),
+        linear-gradient(180deg, #efe2d1 0%, var(--bg) 45%, #efe8de 100%);
+    }}
+    .page {{
+      width: min(1400px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 32px 0 48px;
+    }}
+    .hero {{
+      background: rgba(255, 250, 243, 0.88);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 24px;
+      margin-bottom: 24px;
+    }}
+    .hero h1 {{
+      margin: 0 0 10px;
+      font-size: clamp(28px, 4vw, 46px);
+    }}
+    .hero p {{
+      margin: 6px 0;
+      color: var(--muted);
+    }}
+    .date-section {{
+      margin-top: 28px;
+    }}
+    .date-title {{
+      position: sticky;
+      top: 0;
+      background: rgba(244, 239, 231, 0.95);
+      padding: 10px 0;
+    }}
+    .group-section {{
+      margin-top: 18px;
+    }}
+    .group-section h2 {{
+      margin: 0 0 12px;
+      padding-left: 12px;
+      border-left: 4px solid var(--accent);
+    }}
+    .sample-list {{
+      display: grid;
+      gap: 18px;
+    }}
+    .sample-card {{
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 18px;
+      box-shadow: 0 12px 30px rgba(73, 45, 24, 0.08);
+    }}
+    .sample-header {{
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }}
+    .sample-header h3 {{
+      margin: 0 0 6px;
+      font-size: 22px;
+    }}
+    .sample-header p {{
+      margin: 0;
+      color: var(--muted);
+    }}
+    .stats {{
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+      color: var(--muted);
+    }}
+    .stats span, .meta-link {{
+      background: var(--accent-soft);
+      color: var(--text);
+      padding: 6px 10px;
+      border-radius: 999px;
+      text-decoration: none;
+      font-size: 14px;
+    }}
+    .thumb-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 14px;
+    }}
+    .thumb {{
+      display: block;
+      text-decoration: none;
+      color: inherit;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+    }}
+    .thumb img {{
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      object-fit: cover;
+      display: block;
+      background: #efe7dc;
+    }}
+    .thumb span {{
+      display: block;
+      padding: 10px 12px;
+      font-size: 14px;
+    }}
+    .empty {{
+      margin: 0;
+      color: var(--muted);
+    }}
+    @media (max-width: 700px) {{
+      .page {{ width: min(100% - 20px, 1400px); }}
+      .sample-card {{ padding: 14px; }}
+    }}
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <h1>LIF Analysis Gallery</h1>
+      <p>Source: {escape(source_file or "Unknown source")}</p>
+      <p>Updated: {escape(generated_at)}</p>
+      <p>Stable page path: index.html</p>
+    </section>
+    {''.join(date_sections) if date_sections else '<p>No processed samples yet.</p>'}
+  </main>
+</body>
+</html>
+"""
+
+            index_path = os.path.join(gallery_root_dir, "index.html")
+            with open(index_path, "w", encoding="utf-8") as html_file:
+                html_file.write(html_content)
+
+            return index_path
+        except Exception as e:
+            print(f"вљ пёЏ  РћС€РёР±РєР° СЃРѕР·РґР°РЅРёСЏ HTML-РіР°Р»РµСЂРµРё: {e}")
+            return None
+
     def extract_sample_info(self, image_name):
         """Извлечение информации о группе и времени из названия изображения"""
         if not image_name:
@@ -1065,6 +1351,8 @@ class MultiSampleLifAnalyzer:
                 'sample_name': image_name,
                 'channels': sample_channels,
                 'mouse_id': mouse_id,
+                'sample_date': self.extract_sample_date(image_name),
+                'sample_slug': self.make_safe_name(image_name, fallback=f"sample_{i+1}"),
                 'channels_count': len(sample_channels),
                 'original_index': i,
                 'is_igg': self.detect_igg_samples(image_name)
@@ -2198,18 +2486,19 @@ class MultiSampleLifAnalyzer:
             print(f"   ❌ Ошибка анализа колокализации: {e}")
             return 0, 0, 0, 0, []
     
-    def process_single_sample(self, sample_data, output_dir, sample_num, total_samples):
+    def process_single_sample(self, sample_data, output_dir, gallery_root_dir, sample_num, total_samples):
         """Обработка одного образца"""
         sample_name = sample_data['sample_name']
         mouse_id = sample_data['mouse_id']
+        sample_date = sample_data.get('sample_date', datetime.now().strftime("%Y-%m-%d"))
         
         print(f"\n[{sample_num}/{total_samples}] 🔬 ОБРАЗЕЦ: {sample_name}")
         print(f"   📁 Группа: {mouse_id}")
         
-        mouse_dir = os.path.join(output_dir, mouse_id)
-        os.makedirs(mouse_dir, exist_ok=True)
-        
-        result = self.create_composite_image(sample_data, mouse_dir)
+        sample_output_dir = self.get_sample_output_dir(gallery_root_dir, sample_data)
+        os.makedirs(sample_output_dir, exist_ok=True)
+
+        result = self.create_composite_image(sample_data, sample_output_dir)
         if result[0] is None:
             print(f"   ❌ Пропуск образца (ошибка создания композита)")
             return None
@@ -2237,22 +2526,46 @@ class MultiSampleLifAnalyzer:
             
             safe_name = "".join(c for c in sample_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
             csv_filename = f"{safe_name}_results.csv"
-            csv_path = os.path.join(mouse_dir, csv_filename)
+            csv_path = os.path.join(sample_output_dir, csv_filename)
             
             results_df = pd.DataFrame(colocalization_data)
             results_df.to_csv(csv_path, index=False, encoding='utf-8')
+
+            gallery_rel_dir = os.path.relpath(sample_output_dir, gallery_root_dir).replace("\\", "/")
+            gallery_images = []
+            for label, filename in [
+                ("Composite", f"{safe_name}_composite.png"),
+                ("Annotated Composite", f"{safe_name}_composite_annotated.png"),
+                ("Vesicles Original", f"{safe_name}_channel2_vesicles_ORIGINAL.png"),
+                ("Vesicles Corrected", f"{safe_name}_channel2_vesicles_CORRECTED.png"),
+                ("Vesicles Annotated", f"{safe_name}_channel2_vesicles_annotated.png"),
+                ("Protein Original", f"{safe_name}_channel3_protein_ORIGINAL.png"),
+                ("Protein Corrected", f"{safe_name}_channel3_protein_CORRECTED.png"),
+                ("Nuclei Original", f"{safe_name}_channel0_nuclei_ORIGINAL.png"),
+                ("Nuclei Corrected", f"{safe_name}_channel0_nuclei_CORRECTED.png"),
+                ("Collagen Original", f"{safe_name}_channel1_collagen_ORIGINAL.png"),
+            ]:
+                full_path = os.path.join(sample_output_dir, filename)
+                if os.path.exists(full_path):
+                    gallery_images.append({
+                        'label': label,
+                        'path': f"{gallery_rel_dir}/{filename}"
+                    })
             
             summary = {
                 'sample_name': sample_name,
                 'mouse_id': mouse_id,
-                'composite_image': composite_filename,
+                'sample_date': sample_date,
+                'composite_image': f"{gallery_rel_dir}/{composite_filename}",
                 'results_csv': csv_filename,
+                'results_csv_path': f"{gallery_rel_dir}/{csv_filename}",
                 'total_vesicles': total,
                 'colocalized_vesicles': colocalized,
                 'vesicles_in_cells': vesicles_in_cells,
                 'colocalization_percentage': percentage,
                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'has_original_vesicles': vesicles_original is not None
+                'has_original_vesicles': vesicles_original is not None,
+                'gallery_images': gallery_images
             }
             
             print(f"   ✅ РЕЗУЛЬТАТЫ:")
@@ -2274,11 +2587,14 @@ class MultiSampleLifAnalyzer:
         base_name = os.path.splitext(os.path.basename(lif_file_path))[0]
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         output_dir = os.path.join(output_base_dir, f"analysis_{base_name}_{timestamp}")
+        gallery_root_dir = os.path.join(output_base_dir, "html_gallery")
         os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(gallery_root_dir, exist_ok=True)
         
         print(f"\n🚀 НАЧАЛО ОБРАБОТКИ LIF ФАЙЛА")
         print(f"📁 Входной файл: {lif_file_path}")
         print(f"📁 Выходная папка: {output_dir}")
+        print(f"HTML gallery: {gallery_root_dir}")
         print("=" * 60)
         
         # Загрузка данных из LIF файла
@@ -2300,7 +2616,7 @@ class MultiSampleLifAnalyzer:
             
             for sample_data in samples:
                 processed_count += 1
-                summary = self.process_single_sample(sample_data, output_dir, processed_count, total_samples)
+                summary = self.process_single_sample(sample_data, output_dir, gallery_root_dir, processed_count, total_samples)
                 
                 if summary:
                     all_summaries.append(summary)
@@ -2311,6 +2627,9 @@ class MultiSampleLifAnalyzer:
             summary_df = pd.DataFrame(all_summaries)
             summary_path = os.path.join(output_dir, "00_analysis_summary.csv")
             summary_df.to_csv(summary_path, index=False, encoding='utf-8')
+            gallery_summary_path = os.path.join(gallery_root_dir, "00_analysis_summary.csv")
+            summary_df.to_csv(gallery_summary_path, index=False, encoding='utf-8')
+            gallery_index_path = self.create_html_gallery(gallery_root_dir, all_summaries, source_file=lif_file_path)
             
             total_processed = len(all_summaries)
             avg_percentage = summary_df['colocalization_percentage'].mean()
@@ -2322,6 +2641,8 @@ class MultiSampleLifAnalyzer:
             print(f"📈 СРЕДНИЙ ПРОЦЕНТ КОЛОКАЛИЗАЦИИ: {avg_percentage:.2f}%")
             print(f"⏱️ ВРЕМЯ: {processing_time:.2f} сек")
             print(f"💾 РЕЗУЛЬТАТЫ: {output_dir}")
+            if gallery_index_path:
+                print(f"HTML page: {gallery_index_path}")
             print("=" * 60)
             
             return all_summaries, output_dir
