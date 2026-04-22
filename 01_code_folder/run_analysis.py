@@ -16,7 +16,7 @@ except ImportError as e:
 def main():
     # === НАСТРОЙКИ ===
     # ⭐ ИЗМЕНИТЕ ЭТИ ПУТИ ПОД ВАШУ СИСТЕМУ
-    LIF_FILE_PATH = "C:/Users/Petr/VSCode_Python/fibros_analysis/02_raw_data/lif_files/aSMa_647_EVs_594.lif"
+    LIF_FILE_PATH = "C:/Users/Petr/VSCode_Python/fibros_analysis/02_raw_data/lif_files/FAPa 647 EVs 594 (1).lif"
     IGG_LIF_FILE_PATH = "C:/Users/Petr/VSCode_Python/fibros_analysis/02_raw_data/lif_files/IHC_IgG_647_EVs_594.lif"
     OUTPUT_DIR = "C:/Users/Petr/VSCode_Python/fibros_analysis/03_processing_results"
     
@@ -299,42 +299,51 @@ def main():
                     print(f"   ⚠️  Не удалось сохранить базу данных: {e}")
             
             # Статистика по фильтрованным образцам
+            # Статистика по фильтрованным образцам
             if filtered_summaries:
                 print(f"\n📈 СТАТИСТИКА КОЛОКАЛИЗАЦИИ (только целевые образцы):")
                 
                 total_vesicles = sum(s['total_vesicles'] for s in filtered_summaries)
-                colocalized_vesicles = sum(s['colocalized_vesicles'] for s in filtered_summaries)
                 vesicles_in_cells = sum(s.get('vesicles_in_cells', 0) for s in filtered_summaries)
                 
+                # ⭐ ВАЖНО: colocalized_vesicles - это КОЛИЧЕСТВО везикул, колокализованных с белком
+                # Оно НЕ может быть больше total_vesicles!
+                colocalized_vesicles = sum(s.get('colocalized_vesicles', 0) for s in filtered_summaries)
+                
                 # Вычисляем средние значения
-                avg_total = total_vesicles / len(filtered_summaries) if len(filtered_summaries) > 0 else 0
-                avg_colocalized = colocalized_vesicles / len(filtered_summaries) if len(filtered_summaries) > 0 else 0
-                avg_in_cells = vesicles_in_cells / len(filtered_summaries) if len(filtered_summaries) > 0 else 0
+                n_samples = len(filtered_summaries)
+                avg_total = total_vesicles / n_samples if n_samples > 0 else 0
+                avg_in_cells = vesicles_in_cells / n_samples if n_samples > 0 else 0
+                avg_colocalized = colocalized_vesicles / n_samples if n_samples > 0 else 0
                 
-                # Проценты
+                # Проценты (от общего количества везикул)
                 if total_vesicles > 0:
-                    colocalization_rate = (colocalized_vesicles / total_vesicles) * 100
                     in_cells_rate = (vesicles_in_cells / total_vesicles) * 100
+                    colocalization_rate = (colocalized_vesicles / total_vesicles) * 100
                 else:
-                    colocalization_rate = 0
                     in_cells_rate = 0
+                    colocalization_rate = 0
                 
-                # Средние проценты по образцам
-                avg_percentage = sum(s['colocalization_percentage'] for s in filtered_summaries) / len(filtered_summaries) if len(filtered_summaries) > 0 else 0
+                # Средний процент по образцам (не суммарный)
+                avg_percentage = sum(s['colocalization_percentage'] for s in filtered_summaries) / n_samples if n_samples > 0 else 0
+                avg_percent_in_cells = sum(s.get('percent_in_cells', 0) for s in filtered_summaries) / n_samples if n_samples > 0 else 0
                 
                 print(f"   📊 АБСОЛЮТНЫЕ ЗНАЧЕНИЯ:")
                 print(f"      • Всего везикул: {total_vesicles}")
-                print(f"      • Везикул в макрофагах: {colocalized_vesicles}")
-                print(f"      • Везикул в клетках: {vesicles_in_cells}")
+                print(f"      • Везикул в клетках (по маркеру): {vesicles_in_cells}")
+                print(f"      • Колокализовано с белком: {colocalized_vesicles}")
                 
                 print(f"   📊 СРЕДНИЕ ЗНАЧЕНИЯ НА ОБРАЗЕЦ:")
                 print(f"      • Везикул всего: {avg_total:.1f}")
-                print(f"      • Везикул в макрофагах: {avg_colocalized:.1f}")
                 print(f"      • Везикул в клетках: {avg_in_cells:.1f}")
+                print(f"      • Колокализовано с белком: {avg_colocalized:.1f}")
                 
-                print(f"   📊 ПРОЦЕНТЫ:")
-                print(f"      • % везикул в макрофагах: {colocalization_rate:.1f}%")
+                print(f"   📊 ПРОЦЕНТЫ (от общего числа везикул):")
                 print(f"      • % везикул в клетках: {in_cells_rate:.1f}%")
+                print(f"      • % колокализации с белком: {colocalization_rate:.1f}%")
+                
+                print(f"   📊 СРЕДНИЕ ПРОЦЕНТЫ ПО ОБРАЗЦАМ:")
+                print(f"      • Средний % везикул в клетках: {avg_percent_in_cells:.1f}%")
                 print(f"      • Средний % колокализации: {avg_percentage:.1f}%")
             
             print(f"\n📁 РЕЗУЛЬТАТЫ СОХРАНЕНЫ В:")
