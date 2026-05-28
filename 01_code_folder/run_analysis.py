@@ -4,6 +4,19 @@ import sys
 from datetime import datetime
 import traceback
 import numpy as np
+log_filename = f"analysis_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+log_file = open(log_filename, 'w', encoding='utf-8')
+
+class Tee:
+    def __init__(self, *files):
+        self.files = files
+    def write(self, obj):
+        for f in self.files:
+            f.write(obj)
+            f.flush()
+    def flush(self):
+        for f in self.files:
+            f.flush()
 
 try:
     from multi_lif_analyzer import MultiSampleLifAnalyzer
@@ -24,12 +37,13 @@ def main():
     IGG_DATABASE_PATH = "C:/Users/Petr/VSCode_Python/fibros_analysis/02_raw_data/igg_database"
 
     ANALYSIS_CONFIG = {
-        'min_vesicle_size': 1,
-        'max_vesicle_size': 200,
+        'min_vesicle_size': 3,
+        'max_vesicle_size': 250,
         'collagen_percentile': 80,
-        'vesicle_subtraction_factor': 0.8,
+        'vesicle_subtraction_factor': 0.5,
         'protein_subtraction_percent': 90,
         'vesicles_contrast_factor': 1.0,
+        'vesicle_brightness_factor': 1.0,
         'protein_brightness_factor': 1.7,
         'protein_contrast_factor': 1.5,
         'exclude_patterns': ['igg', 'pbs', 'control', 'neg'],
@@ -38,7 +52,10 @@ def main():
         'intensity_diff_threshold': 10,
         'background_method': 'original',
         'igg_database_path': IGG_DATABASE_PATH,
-        'min_vesicle_intensity': 100,
+        # Мин. яркость пикселя в канале 2 (красные везикулы, 0-255) для ОТБОРА при сегментации.
+        # Не влияет на сохранение яркости после вычитания фона (см. preserve mask в background_corrector).
+        # Калибровка по 48 образцам: ~29-34; 75 — консервативнее (меньше ложных пятен).
+        'min_vesicle_intensity': 70,
 
 
         # ⭐ НОВЫЕ ПАРАМЕТРЫ
@@ -49,6 +66,10 @@ def main():
         'nuclei_gamma': 0.8,
         'vesicles_gamma': 1.0,
         'protein_gamma': 0.8,
+
+        'cluster_threshold_factor': 1.5,      # порог определения скопления
+        'split_iterations_factor': 1.4,       # порог продолжения итераций
+        'max_split_iterations': 10,            # макс. итераций разделения
         
     }
     
@@ -93,6 +114,7 @@ def main():
             background_method=ANALYSIS_CONFIG['background_method'],
             subtraction_factor=ANALYSIS_CONFIG['vesicle_subtraction_factor'],
             vesicles_contrast_factor=ANALYSIS_CONFIG['vesicles_contrast_factor'],
+            vesicle_brightness_factor=ANALYSIS_CONFIG['vesicle_brightness_factor'],
             protein_contrast_factor=ANALYSIS_CONFIG['protein_contrast_factor'],
             protein_brightness_factor=ANALYSIS_CONFIG['protein_brightness_factor'],
             split_large_clusters=ANALYSIS_CONFIG['split_large_clusters'],
@@ -112,6 +134,10 @@ def main():
             vesicles_gamma=ANALYSIS_CONFIG['vesicles_gamma'],
             protein_gamma=ANALYSIS_CONFIG['protein_gamma'],
             min_vesicle_intensity=ANALYSIS_CONFIG['min_vesicle_intensity'],
+
+            cluster_threshold_factor=ANALYSIS_CONFIG['cluster_threshold_factor'],
+            split_iterations_factor=ANALYSIS_CONFIG['split_iterations_factor'],
+            max_split_iterations=ANALYSIS_CONFIG['max_split_iterations'],
             
         )
         print("✅ Анализатор успешно создан")
@@ -379,6 +405,9 @@ def main():
         print(f"   4. Ошибка в коде анализатора")
 
 if __name__ == "__main__":
+    sys.stdout = Tee(sys.stdout, log_file)
     main()
     print("\nНажмите Enter для выхода...")
-    input()
+    input() 
+
+

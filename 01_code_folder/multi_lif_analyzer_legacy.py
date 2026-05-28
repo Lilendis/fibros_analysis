@@ -1610,34 +1610,37 @@ class MultiSampleLifAnalyzer:
             print("   🎨 Подготовка каналов для визуализации...")
             
             # --- ВЕЗИКУЛЫ (КРАСНЫЙ) ---
-            vesicles_channel_visual = vesicles_channel_original.copy()
-            
-            # Вычитание коллагена с защитой везикул
-            if collagen_channel_raw is not None:
-                print(f"      🧹 Вычитание коллагена из фона...")
-                
-                # Создаем защитную маску
-                if vesicles_binary is not None and np.sum(vesicles_binary) > 0:
-                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                    protected_mask = cv2.dilate(vesicles_binary.astype(np.uint8), kernel, iterations=1).astype(bool)
-                    bright_pixels = vesicles_channel_original > self.min_vesicle_intensity * 0.8
-                    protected_mask = protected_mask | bright_pixels
-                else:
-                    protected_mask = vesicles_channel_original > self.min_vesicle_intensity * 0.8
-                
-                background_mask = ~protected_mask
-                
-                # Вычитание
-                vesicles_float = vesicles_channel_visual.astype(np.float32)
+            vesicles_channel_corrected = vesicles_channel_original.copy()
+
+            if collagen_channel_raw is not None and hasattr(self, "subtract_collagen_preserve_vesicles"):
+                print(f"      🧹 Вычитание коллагена с сохранением интенсивности везикул...")
+                vesicles_channel_corrected = self.subtract_collagen_preserve_vesicles(
+                    vesicles_channel_original,
+                    collagen_channel_raw,
+                    vesicles_binary,
+                )
+            elif collagen_channel_raw is not None:
+                print(f"      🧹 Вычитание коллагена из фона (без восстановления маски)...")
+                vesicles_float = vesicles_channel_corrected.astype(np.float32)
                 collagen_float = collagen_channel_raw.astype(np.float32)
                 subtraction_amount = collagen_float * self.subtraction_factor
-                vesicles_float[background_mask] = np.maximum(0, vesicles_float[background_mask] - subtraction_amount[background_mask])
-                vesicles_channel_visual = np.clip(vesicles_float, 0, 255).astype(np.uint8)
-            
-            # Предобработка везикул
-            vesicles_channel_visual = self.preprocess_channel(vesicles_channel_visual, 2)
-            vesicles_channel_visual = self.enhance_vesicles_brightness(vesicles_channel_visual)
-            vesicles_channel_visual = self.enhance_contrast(vesicles_channel_visual, max(1.0, self.vesicles_contrast_factor))
+                vesicles_float = np.maximum(0, vesicles_float - subtraction_amount)
+                vesicles_channel_corrected = np.clip(vesicles_float, 0, 255).astype(np.uint8)
+
+            if hasattr(self, "finalize_vesicle_display_channel"):
+                vesicles_channel_visual = self.finalize_vesicle_display_channel(
+                    vesicles_channel_original,
+                    vesicles_channel_corrected,
+                    vesicles_binary,
+                )
+            else:
+                vesicles_channel_visual = vesicles_channel_corrected
+                vesicles_channel_visual = self.preprocess_channel(vesicles_channel_visual, 2)
+                vesicles_channel_visual = self.enhance_vesicles_brightness(vesicles_channel_visual)
+                vesicles_channel_visual = self.enhance_contrast(
+                    vesicles_channel_visual,
+                    max(1.0, self.vesicles_contrast_factor),
+                )
             
             # --- БЕЛОК (ЗЕЛЕНЫЙ) ---
             print("   🔧 Обработка белка по эталону...")
@@ -1720,9 +1723,15 @@ class MultiSampleLifAnalyzer:
             nuclei_mask = nuclei_channel_visual > 20  # Порог для ядер
             composite[nuclei_mask, 0] = nuclei_channel_visual[nuclei_mask]  # Синий канал - Ядра (только где есть сигнал)
 
-            # ШАГ 3: Сверху добавляем везикулы (красные)
-            vesicles_mask = vesicles_channel_visual > 10  # Порог для везикул
-            composite[vesicles_mask, 2] = vesicles_channel_visual[vesicles_mask]  # Красный канал - Везикулы (только где есть сигнал)
+            # ШАГ 3: Сверху добавляем везикулы (красные) по маске сегментации
+            if vesicles_binary is not None and np.sum(vesicles_binary) > 0:
+                vesicles_mask = vesicles_binary > 0
+                composite[vesicles_mask, 2] = vesicles_channel_visual[vesicles_mask]
+                print(f"         Везикулы на композите: маска сегментации ({np.sum(vesicles_mask)} px)")
+            else:
+                vesicles_mask = vesicles_channel_visual > 10
+                composite[vesicles_mask, 2] = vesicles_channel_visual[vesicles_mask]
+                print(f"         Везикулы на композите: fallback порог >10 ({np.sum(vesicles_mask)} px)")
 
             print(f"   📊 Статистика наложения:")
             print(f"      • Пикселей с белком: {np.sum(composite[:,:,1] > 0)}")
@@ -1770,7 +1779,15 @@ class MultiSampleLifAnalyzer:
             
             print(f"   ✅ Все изображения сохранены")
             
-            return composite, nuclei_channel_visual, vesicles_binary, protein_channel_visual, f"{safe_name}_composite.png", vesicles_channel_original
+            return (
+                composite,
+                nuclei_channel_visual,
+                vesicles_binary,
+                protein_channel_visual,
+                f"{safe_name}_composite.png",
+                vesicles_channel_original,
+                vesicles_channel_visual,
+            )
             
         except Exception as e:
             print(f"   ❌ Ошибка создания композита: {e}")
@@ -2065,7 +2082,7 @@ class MultiSampleLifAnalyzer:
                     
                     # ⭐ МЕТОД 3: Равномерная сетка (гарантированный результат)
                     result_mask = self.uniform_grid_segmentation_improved(
-                        cluster_mask, cluster_area, target_size, y_min, y_max, x_min, x_max
+                        cluster_mask, cluster_area, target_size, y_min, y_max, x_min, x_max, vesicles_channel
                     )
                     
                     # Финальная проверка интенсивности
@@ -2496,24 +2513,52 @@ class MultiSampleLifAnalyzer:
             print(f"   ❌ Пропуск образца (ошибка создания композита)")
             return None
         
-        composite, nuclei_processed, vesicles_binary, protein_processed, composite_filename, vesicles_original = result
-        
+        if len(result) >= 7:
+            (
+                composite,
+                nuclei_processed,
+                vesicles_binary,
+                protein_processed,
+                composite_filename,
+                vesicles_original,
+                vesicles_corrected,
+            ) = result[:7]
+        else:
+            composite, nuclei_processed, vesicles_binary, protein_processed, composite_filename, vesicles_original = result
+            vesicles_corrected = None
+
         if vesicles_binary is None:
             print(f"   ⚠️ Нет маски везикул, пропускаем")
             return None
-        
-        # ⭐ Получаем канал клеточного маркера (канал 1)
+
         channels = sample_data.get('channels', {})
         cell_marker_channel = channels.get(1)
         if cell_marker_channel is None:
             print(f"   ⚠️ Нет канала клеточного маркера (канал 1)")
             return None
-        
-        # ⭐ Применяем вычитание с сохранением интенсивности везикул
-        vesicles_corrected = self.subtract_collagen_preserve_vesicles(
-            vesicles_original, cell_marker_channel, vesicles_binary
-        )
-        
+
+        if vesicles_corrected is None:
+            vesicles_corrected = self.subtract_collagen_preserve_vesicles(
+                vesicles_original, cell_marker_channel, vesicles_binary
+            )
+            if hasattr(self, "finalize_vesicle_display_channel"):
+                vesicles_corrected = self.finalize_vesicle_display_channel(
+                    vesicles_original, vesicles_corrected, vesicles_binary
+                )
+
+        safe_name = "".join(c for c in sample_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        if vesicles_corrected is not None and np.sum(vesicles_binary) > 0:
+            vesicles_corr_colored = np.zeros((*vesicles_corrected.shape, 3), dtype=np.uint8)
+            vesicles_corr_colored[:, :, 2] = vesicles_corrected
+            vesicles_corr_colored = self.add_scale_bar(vesicles_corr_colored, scale_length_pixels=100, scale_text="100 μm")
+            cv2.imwrite(
+                os.path.join(sample_output_dir, f"{safe_name}_channel2_vesicles_CORRECTED.png"),
+                vesicles_corr_colored,
+            )
+            self.save_annotated_images(
+                composite, vesicles_binary, None, vesicles_corrected, safe_name, sample_output_dir
+            )
+
         # ⭐ Новая логика колокализации (без макрофагов)
         localization_result = self.analyze_vesicle_localization(
             vesicles_binary,
@@ -3287,7 +3332,7 @@ class MultiSampleLifAnalyzer:
             return np.zeros_like(cluster_mask, dtype=bool)
         
 
-    def uniform_grid_segmentation_improved(self, cluster_mask, cluster_area, target_size, y_min, y_max, x_min, x_max):
+    def uniform_grid_segmentation_improved(self, cluster_mask, cluster_area, target_size, y_min, y_max, x_min, x_max, vesicles_channel):
         """Улучшенная равномерная сетка с проверкой интенсивности"""
         try:
             height, width = y_max - y_min + 1, x_max - x_min + 1
