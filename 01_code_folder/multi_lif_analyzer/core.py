@@ -35,6 +35,7 @@ class MultiSampleLifAnalyzer(
         intensity_ratio_threshold=1.5,
         intensity_diff_threshold=20,
         protein_brightness_factor=1.0,
+        vesicle_brightness_factor=1.0,
         save_igg_data_path=None,
         protein_subtraction_percent=90,
         collagen_percentile=90,
@@ -47,6 +48,9 @@ class MultiSampleLifAnalyzer(
         nuclei_gamma=0.8,
         vesicles_gamma=0.7,
         protein_gamma=0.8,
+        cluster_threshold_factor=1.2,
+        split_iterations_factor=1.1,
+        max_split_iterations=6,
     ):
         self.gamma_values = {
             0: nuclei_gamma,
@@ -68,12 +72,16 @@ class MultiSampleLifAnalyzer(
         self.protein_contrast_factor = protein_contrast_factor
         self.split_large_clusters = split_large_clusters
         self.protein_brightness_factor = protein_brightness_factor
+        self.vesicle_brightness_factor = vesicle_brightness_factor
         self.intensity_ratio_threshold = intensity_ratio_threshold
         self.intensity_diff_threshold = intensity_diff_threshold
         self.protein_subtraction_percent = protein_subtraction_percent
         self.collagen_percentile = collagen_percentile
         self.min_vesicle_intensity = min_vesicle_intensity
         self.save_igg_data_path = save_igg_data_path
+        self.cluster_threshold_factor = cluster_threshold_factor
+        self.split_iterations_factor = split_iterations_factor
+        self.max_split_iterations = max_split_iterations
 
         self.igg_intensity_data = {}
         self.collagen_intensity_data = {}
@@ -90,6 +98,10 @@ class MultiSampleLifAnalyzer(
         print(f"         Contrast protein: {protein_contrast_factor}")
         print(f"         Split clusters: {'ON' if split_large_clusters else 'OFF'}")
         print(f"         Min vesicle intensity: {min_vesicle_intensity}")
+        print(f"         Vesicle brightness factor: {vesicle_brightness_factor}")
+        print(f"         Cluster threshold factor: {cluster_threshold_factor}")
+        print(f"         Split iterations factor: {split_iterations_factor}")
+        print(f"         Max split iterations: {max_split_iterations}")
 
     process_lif_file = LegacyMultiSampleLifAnalyzer.process_lif_file
 
@@ -110,7 +122,19 @@ class MultiSampleLifAnalyzer(
             print("   Error: skipping sample because composite creation failed")
             return None
 
-        composite, nuclei_processed, vesicles_binary, protein_processed, composite_filename, vesicles_original = result
+        if len(result) >= 7:
+            (
+                composite,
+                nuclei_processed,
+                vesicles_binary,
+                protein_processed,
+                composite_filename,
+                vesicles_original,
+                vesicles_display,
+            ) = result[:7]
+        else:
+            composite, nuclei_processed, vesicles_binary, protein_processed, composite_filename, vesicles_original = result
+            vesicles_display = None
 
         if vesicles_binary is None:
             print("   Error: vesicle mask is missing")
@@ -122,12 +146,41 @@ class MultiSampleLifAnalyzer(
             print("   Error: cell marker channel (channel 1) is missing")
             return None
 
-        print("   Applying collagen subtraction with vesicle protection...")
-        vesicles_corrected = self.subtract_collagen_preserve_vesicles(
-            vesicles_original,
-            cell_marker_channel,
+        if vesicles_display is not None:
+            vesicles_corrected = np.asarray(vesicles_display).copy()
+            print("   Using vesicle channel from composite (intensity preserved in mask)")
+        else:
+            print("   Applying collagen subtraction with vesicle protection...")
+            vesicles_corrected = self.subtract_collagen_preserve_vesicles(
+                vesicles_original,
+                cell_marker_channel,
+                vesicles_binary,
+            )
+            vesicles_corrected = self.finalize_vesicle_display_channel(
+                vesicles_original,
+                vesicles_corrected,
+                vesicles_binary,
+            )
+
+        composite = self.sync_corrected_vesicles_outputs(
+            sample_data,
+            sample_output_dir,
+            composite,
+            composite_filename,
             vesicles_binary,
+            vesicles_corrected,
         )
+
+        safe_name = "".join(c for c in sample_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        if vesicles_binary is not None and np.sum(vesicles_binary) > 0:
+            self.save_annotated_images(
+                composite,
+                vesicles_binary,
+                None,
+                vesicles_corrected,
+                safe_name,
+                sample_output_dir,
+            )
 
         localization_result = self.analyze_vesicle_localization(
             vesicles_binary,
@@ -137,7 +190,6 @@ class MultiSampleLifAnalyzer(
             sample_name,
         )
 
-        safe_name = "".join(c for c in sample_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
         csv_filename = f"{safe_name}_results.csv"
         csv_path = os.path.join(sample_output_dir, csv_filename)
 
@@ -145,7 +197,7 @@ class MultiSampleLifAnalyzer(
         labeled_vesicles = measure.label(vesicles_binary)
         positive_protein = protein_processed[protein_processed > 0]
         protein_threshold = float(np.percentile(positive_protein, 50)) if positive_protein.size > 0 else 50.0
-        colocalized_mask = np.logical_and(vesicles_corrected > 10, protein_processed > protein_threshold)
+        colocalized_mask = np.logical_and(vesicles_binary > 0, protein_processed > protein_threshold)
 
         for region in measure.regionprops(labeled_vesicles):
             region_mask = labeled_vesicles == region.label
@@ -157,6 +209,7 @@ class MultiSampleLifAnalyzer(
                 'area': int(region.area),
                 'centroid_x': float(region.centroid[1]),
                 'centroid_y': float(region.centroid[0]),
+                'mean_intensity': float(np.mean(vesicles_corrected[region_mask])),
                 'in_cell': in_cell,
                 'colocalized': colocalized,
             })

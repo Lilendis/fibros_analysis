@@ -28,7 +28,7 @@ class ColocalizationAnalyzerMixin:
                 protein_threshold = 50.0
                 print(f"      Step 3: no positive protein pixels found, using fallback threshold = {protein_threshold:.2f}")
 
-            colocalized_mask = (vesicles_corrected > 10) & (protein_corrected > protein_threshold)
+            colocalized_mask = (vesicles_binary > 0) & (protein_corrected > protein_threshold)
             colocalized_vesicles_mask = np.logical_and(vesicles_binary, colocalized_mask)
             colocalized_labels = measure.label(colocalized_vesicles_mask)
             colocalized_count = len(np.unique(colocalized_labels)) - 1 if np.any(colocalized_vesicles_mask) else 0
