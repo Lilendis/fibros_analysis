@@ -29,7 +29,7 @@ except ImportError as e:
 def main():
     # === НАСТРОЙКИ ===
     # ⭐ ИЗМЕНИТЕ ЭТИ ПУТИ ПОД ВАШУ СИСТЕМУ
-    LIF_FILE_PATH = "C:/Users/Petr/VSCode_Python/fibros_analysis/02_raw_data/lif_files/FAPa 647 EVs 594 (1).lif"
+    LIF_FILE_PATH = "C:/Users/Petr/VSCode_Python/fibros_analysis/02_raw_data/lif_files/CD206 647 EVs 594.lif"
     IGG_LIF_FILE_PATH = "C:/Users/Petr/VSCode_Python/fibros_analysis/02_raw_data/lif_files/IHC_IgG_647_EVs_594.lif"
     OUTPUT_DIR = "C:/Users/Petr/VSCode_Python/fibros_analysis/03_processing_results"
     
@@ -37,7 +37,7 @@ def main():
     IGG_DATABASE_PATH = "C:/Users/Petr/VSCode_Python/fibros_analysis/02_raw_data/igg_database"
 
     ANALYSIS_CONFIG = {
-        'min_vesicle_size': 3,
+        'min_vesicle_size': 2,
         'max_vesicle_size': 250,
         'collagen_percentile': 80,
         'vesicle_subtraction_factor': 0.5,
@@ -68,8 +68,8 @@ def main():
         'protein_gamma': 0.8,
 
         'cluster_threshold_factor': 1.5,      # порог определения скопления
-        'split_iterations_factor': 1.4,       # порог продолжения итераций
-        'max_split_iterations': 10,            # макс. итераций разделения
+        'split_iterations_factor': 1.7,       # порог продолжения итераций
+        'max_split_iterations': 15,            # макс. итераций разделения
         
     }
     

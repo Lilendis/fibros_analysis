@@ -8,11 +8,12 @@ import streamlit as st
 import numpy as np
 import json
 from pathlib import Path
-from vesicle_processor import VesicleProcessor
+from vesicle_processor import VesicleProcessor, MacrophageProcessor
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 import os
 from datetime import datetime
+
 
 # ============================================================================
 # КОНФИГУРАЦИЯ STREAMLIT
@@ -75,6 +76,9 @@ if 'params' not in st.session_state:
         'protein_threshold': 50,
         'collagen_percentile': 50,
         'nuclei_percentile': 50,
+        'analyze_macrophages': True,
+        'expansion_factor': 1.58,
+        'nuclei_contrast': 1.0
     }
 
 
@@ -170,7 +174,7 @@ def get_available_samples(preprocessed_path: str):
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ОБРАБОТКИ
 # ============================================================================
 
-def process_sample(channels, params):
+def process_sample(channels, params, analyze_macrophages, expansion_factor):
     """
     Обрабатывает образец с текущими параметрами.
     """
@@ -228,6 +232,22 @@ def process_sample(channels, params):
         nuclei_percentile=params['nuclei_percentile']
     )
     
+    macrophage_labels = None
+    macrophage_stats = {}
+    if analyze_macrophages:
+        macrophage_labels = MacrophageProcessor.segment_macrophages(
+            nuclei, protein_corrected,
+            nuclei_percentile=params['nuclei_percentile'],
+            protein_threshold=params['protein_threshold'],
+            expansion_factor=expansion_factor
+        )
+        macrophage_stats = MacrophageProcessor.analyze_colocalization(
+            macrophage_labels,
+            vesicles_binary,  # это сырая маска везикул (до удаления больших объектов)
+            vesicles_labeled
+        )
+        coloc_stats.update(macrophage_stats)
+
     return {
         'channels': [nuclei, collagen, vesicles_raw, protein_raw],  # ← ДОБАВЛЕНО
         'nuclei': nuclei,
@@ -239,7 +259,9 @@ def process_sample(channels, params):
         'vesicles_binary': vesicles_binary,
         'vesicles_labeled': vesicles_labeled,
         'num_vesicles': num_vesicles,
-        'coloc_stats': coloc_stats
+        'coloc_stats': coloc_stats,
+        'macrophage_labels': macrophage_labels,
+        'macrophage_stats': macrophage_stats
     }
 
 
@@ -252,7 +274,34 @@ def create_visualization_images(processed_data, params):
         protein_corrected = processed_data['protein_corrected']
         segmentation_labeled = processed_data['vesicles_labeled']
         collagen = processed_data['collagen']
+        macrophage_labels = processed_data.get('macrophage_labels', None)
         
+        # ---------- Нормализация и настройка отображения каналов ----------
+        def to_uint8_norm(channel):
+            if channel.dtype == np.uint8:
+                return channel
+            ch = channel.astype(np.float32)
+            if ch.max() > 0:
+                ch = (ch / ch.max() * 255).astype(np.uint8)
+            else:
+                ch = ch.astype(np.uint8)
+            return ch
+
+        # Базовые 8-битные копии
+        nuclei_8 = to_uint8_norm(processed_data['nuclei'])
+        vesicles_8 = to_uint8_norm(processed_data['vesicles_corrected'])
+        protein_8 = to_uint8_norm(processed_data['protein_corrected'])
+        protein_raw_8 = to_uint8_norm(processed_data['protein_raw'])
+        vesicles_raw_8 = to_uint8_norm(processed_data['channels'][2])
+
+        # Применяем яркость (если есть)
+        nuclei_disp = np.clip(nuclei_8 * params.get('nuclei_brightness', 1.0), 0, 255).astype(np.uint8)
+        # Применяем контраст (гамма-коррекция)
+        nuclei_contrast = params.get('nuclei_contrast', 1.0)
+        if nuclei_contrast != 1.0:
+            gamma = 1.0 / nuclei_contrast
+            nuclei_disp = (255 * ((nuclei_disp / 255.0) ** gamma)).astype(np.uint8)
+
         # ---------- Классификация везикул ----------
         classification_mask, vesicle_classes = processor.classify_vesicles(
             segmentation_labeled,
@@ -261,7 +310,8 @@ def create_visualization_images(processed_data, params):
             nuclei_channel=processed_data['nuclei'],
             protein_threshold=params.get('protein_threshold', 50),
             collagen_percentile=params.get('collagen_percentile', 50),
-            nuclei_percentile=params.get('nuclei_percentile', 50)
+            nuclei_percentile=params.get('nuclei_percentile', 50),
+            macrophage_labels=macrophage_labels
         )
 
         # Проверяем что vesicle_classes не пустой
@@ -279,11 +329,18 @@ def create_visualization_images(processed_data, params):
         
         # 2. Корректированный композит
         composite_corrected = processor.create_composite_rgb(
-            processed_data['nuclei'],
+            nuclei_disp,
             processed_data['collagen'],
             processed_data['vesicles_corrected'],
             protein=processed_data['protein_corrected']
         )
+        if macrophage_labels is not None and np.max(macrophage_labels) > 0:
+            composite_corrected_1 = MacrophageProcessor.draw_macrophages_on_composite(
+                composite_corrected,
+                macrophage_labels,
+                color=(255, 165, 0),  # оранжевый
+                thickness=2
+            )
         composite_corrected = processor.add_scale_bar(composite_corrected)
 
         
@@ -308,13 +365,14 @@ def create_visualization_images(processed_data, params):
         
         # 9. Цветной overlay с везикулами
         colored_overlay = processor.create_colored_vesicle_overlay(
-            composite_corrected,
+            composite_corrected_1,
             segmentation_labeled,
             vesicle_classes,
             colors={
                 0: (0, 255, 255),      # желтый обычная
                 1: (255, 255, 255),      # белый с белком
-                2: (255, 0, 255)     # манджета для везикул с коллагеном
+                2: (255, 0, 255),     # манджета для везикул с коллагеном
+                3: (255, 255, 0)
             },
             thickness=2,
             outer_color=(0, 0, 0),
@@ -509,6 +567,15 @@ if st.session_state.current_data is not None:
             step=0.01,
             help="Коэффициент яркости для ядер после вычитания фона"
         )
+
+        st.session_state.params['nuclei_contrast'] = st.slider(
+            "Контраст ядер",
+            min_value=0.5,
+            max_value=5.0,
+            value=st.session_state.params.get('nuclei_contrast', 1.0),
+            step=0.05,
+            help="<1 – повышает контраст (светлее тени), >1 – понижает контраст (темнее)"
+        )
     
     # Параметры колокализации
     with st.sidebar.expander("🎯 Колокализация"):
@@ -537,6 +604,18 @@ if st.session_state.current_data is not None:
             step=1,
             help="Процент пикселей ядер, используемый как порог для определения 'в клетке' (0 = любая ненулевая интенсивность, 100 = только самые яркие)"
         )
+
+    with st.sidebar.expander("🧫 Макрофаги"):
+        st.session_state.params['analyze_macrophages'] = st.checkbox(
+            "Анализировать макрофаги",
+            value=st.session_state.params['analyze_macrophages']
+        )
+        st.session_state.params['expansion_factor'] = st.slider(
+            "Коэффициент расширения макрофага",
+            min_value=1.0, max_value=2.5, step=0.05,
+            value=st.session_state.params['expansion_factor'],
+            help="Во сколько раз увеличивается радиус ядра для определения области макрофага"
+        )
     
     st.sidebar.divider()
     
@@ -560,6 +639,15 @@ if st.session_state.current_data is not None:
         
         for label, value in metrics:
             st.sidebar.metric(label, value)
+
+        if st.session_state.params.get('analyze_macrophages', False):
+            st.sidebar.divider()
+            st.sidebar.markdown("**🧫 Макрофаги**")
+            st.sidebar.metric("Всего", stats['coloc_stats'].get('total_macrophages', 0))
+            st.sidebar.metric("С везикулами", stats['coloc_stats'].get('macrophages_with_vesicles', 0))
+            st.sidebar.metric("С везикулами %", f"{stats['coloc_stats'].get('macrophage_colocalization_percent', 0.0):.1f}%")
+            st.sidebar.metric("Везикул в макрофагах", stats['coloc_stats'].get('vesicles_in_macrophages', 0))
+            st.sidebar.metric("Среднее везикул на макрофаг", f"{stats['coloc_stats'].get('mean_vesicles_per_macrophage', 0.0):.2f}")
     
     st.sidebar.divider()
     
@@ -582,6 +670,9 @@ if st.session_state.current_data is not None:
             'protein_threshold': 50,
             'collagen_percentile': 50,
             'nuclei_percentile': 50,
+            'analyze_macrophages': True,
+            'expansion_factor': 1.58,
+            'nuclei_contrast': 1.0,
         }
         st.session_state.recalculate_segmentation = True
         st.rerun()
@@ -627,7 +718,9 @@ if st.session_state.current_data is not None:
         with st.spinner("🔄 Обрабатываю образец..."):
             processed = process_sample(
                 st.session_state.current_data['channels'],
-                st.session_state.params
+                st.session_state.params,
+                analyze_macrophages=st.session_state.params['analyze_macrophages'],
+                expansion_factor=st.session_state.params['expansion_factor']
             )
             
             # Сохраняем статистику
@@ -696,7 +789,7 @@ if st.session_state.current_data is not None:
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.markdown("#### 🟢 Коллаген (оригинал)")
+        st.markdown("#### 🟢 Аутофлуоресценция")
         st.image(visuals['collagen_original'])
 
     with col2:
@@ -711,7 +804,7 @@ if st.session_state.current_data is not None:
     
     with col1:
         st.markdown("#### 1️⃣ Оригинальный композит")
-        st.markdown("Ядра (синий) | Коллаген (зелёный) | Везикулы (красный)")
+        st.markdown("Ядра (синий) | Аутофлуоресценция (зелёный) | Везикулы (красный)")
         st.image(visuals['composite_original'])
     
     with col2:
@@ -751,6 +844,14 @@ if st.session_state.current_data is not None:
         st.metric("🔵 С белком", stats['protein_colocalized'])
         st.metric("📊 В клетках, %", f"{stats['percent_in_cells']:.1f}%")
         st.metric("📊 % колокализации", f"{stats['protein_colocalization_percent']:.1f}%")
+        if st.session_state.params.get('analyze_macrophages', False):
+            st.divider()
+            st.write("🧫 **Макрофаги**")
+            st.metric("Всего", stats.get('total_macrophages', 0))
+            st.metric("С везикулами", stats.get('macrophages_with_vesicles', 0))
+            st.metric("% с везикулами", f"{stats.get('macrophage_colocalization_percent', 0.0):.1f}%")
+            st.metric("Везикул внутри", stats.get('vesicles_in_macrophages', 0))
+            st.metric("Среднее везикул/макрофаг", f"{stats.get('mean_vesicles_per_macrophage', 0.0):.2f}")
     
     # Детальная статистика
     st.divider()
@@ -772,6 +873,22 @@ if st.session_state.current_data is not None:
     with col3:
         st.metric("💾 Средн. интенс. белка", f"{stats['mean_protein_intensity']:.0f}")
         st.metric("💾 Средн. интенс. коллагена", f"{stats['mean_collagen_intensity']:.0f}")
+
+
+    # Дополнительная строка для макрофагов (если анализ включён)
+    if st.session_state.params.get('analyze_macrophages', False):
+        st.divider()
+        st.subheader("🧫 Детальная статистика макрофагов")
+        col4, col5, col6 = st.columns(3)
+        with col4:
+            stats = processed['coloc_stats']
+            st.metric("Всего макрофагов", stats.get('total_macrophages', 0))
+            st.metric("Макрофагов с везикулами", stats.get('macrophages_with_vesicles', 0))
+        with col5:
+            st.metric("% макрофагов с везикулами", f"{stats.get('macrophage_colocalization_percent', 0.0):.1f}%")
+            st.metric("Всего везикул в макрофагах", stats.get('vesicles_in_macrophages', 0))
+        with col6:
+            st.metric("Среднее везикул на макрофаг", f"{stats.get('mean_vesicles_per_macrophage', 0.0):.2f}")
     
     # Информация о каналах из метаданных
     if 'channels' in metadata:

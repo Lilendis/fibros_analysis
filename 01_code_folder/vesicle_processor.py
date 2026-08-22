@@ -865,6 +865,11 @@ class VesicleProcessor:
             'Mean Protein Intensity': f"{stats['mean_protein_intensity']:.2f}",
             'Mean Collagen Intensity': f"{stats['mean_collagen_intensity']:.2f}",
             'Mean Vesicle Intensity': f"{stats['mean_vesicle_intensity']:.2f}",
+            'Total Macrophages': stats.get('total_macrophages', 0),
+            'Macrophages with Vesicles': stats.get('macrophages_with_vesicles', 0),
+            'Macrophage Colocalization %': f"{stats.get('macrophage_colocalization_percent', 0.0):.2f}",
+            'Vesicles in Macrophages': stats.get('vesicles_in_macrophages', 0),
+            'Mean Vesicles per Macrophage': f"{stats.get('mean_vesicles_per_macrophage', 0.0):.2f}",
         }
         
         # Записываем в CSV
@@ -1002,7 +1007,7 @@ class VesicleProcessor:
     
 
     def classify_vesicles(self, vesicles_labeled, protein_channel, collagen_channel,
-                      nuclei_channel=None, protein_threshold=50, collagen_percentile=50, nuclei_percentile=50):
+                      nuclei_channel=None, protein_threshold=50, collagen_percentile=50, nuclei_percentile=50, macrophage_labels=None):
         if vesicles_labeled is None:
             return np.array([]), {}
 
@@ -1027,12 +1032,19 @@ class VesicleProcessor:
             # Белковая колокализация возможна только внутри клетки
             with_protein = (mean_protein > protein_threshold) and in_cell
 
-            if with_protein:
-                cls = 1          # с белком (и в клетке)
+            in_macrophage = False
+            if macrophage_labels is not None and np.max(macrophage_labels) > 0:
+                if np.any(macrophage_labels[mask] > 0):
+                    in_macrophage = True
+
+            if in_macrophage:
+                cls = 3         #в макрофаге
+            elif with_protein:
+                cls = 1         #Колокализирована
             elif in_cell:
-                cls = 2          # в клетке, без белка
+                cls = 2         #В клетке
             else:
-                cls = 0          # вне клеток
+                cls = 0         # вне клеток
 
             vesicle_classes[label] = cls
             classification_mask[mask] = cls
@@ -1153,3 +1165,128 @@ class VesicleProcessor:
 
 
 
+class MacrophageProcessor:
+    """Внутренний класс для сегментации и анализа макрофагов."""
+    
+    def segment_macrophages(nuclei, protein, nuclei_percentile=50, protein_threshold=50, expansion_factor=1.58, 
+                       min_macrophage_size=100, max_macrophage_size=3000):
+        """Сегментирует макрофаги. Возвращает размеченную маску."""
+        # ---- Бинаризация ----
+        nuclei_binary = nuclei > np.percentile(nuclei, nuclei_percentile)
+        protein_binary = protein > protein_threshold
+        seed = nuclei_binary & protein_binary
+        seed = morphology.remove_small_objects(seed, min_size=20)
+
+        if not np.any(seed):
+            return np.zeros_like(nuclei, dtype=np.int32)
+
+        # ---- Маркируем начальные объекты ----
+        labeled_seed = measure.label(seed)
+        
+        # ---- Расширяем КАЖДОЕ ядро отдельно ----
+        expanded_labels = np.zeros_like(labeled_seed, dtype=np.int32)
+        
+        # Используем константный радиус для расширения (не зависящий от площади ядра!)
+        # Или используем фиксированный радиус + небольшое расширение
+        FIXED_RADIUS = 30  # ← настройте под ваши изображения (в пикселях)
+        
+        for label_id in range(1, np.max(labeled_seed) + 1):
+            # Маска текущего ядра
+            nucleus_mask = (labeled_seed == label_id)
+            
+            # Находим центроид
+            y, x = np.mean(np.where(nucleus_mask)[0]), np.mean(np.where(nucleus_mask)[1])
+            
+            # Используем ФИКСИРОВАННЫЙ радиус или радиус на основе размера ядра с ограничением
+            # Вариант 1: фиксированный радиус (рекомендую начать с этого)
+            radius = FIXED_RADIUS
+            
+            # Вариант 2: радиус на основе размера ядра, но с ограничением
+            # area = np.sum(nucleus_mask)
+            # radius = min(max(int(np.sqrt(area / np.pi) * 1.5), 20), 50)  # ограничиваем от 20 до 50
+            
+            # Создаём круг для этого конкретного ядра
+            yy, xx = np.ogrid[:nuclei.shape[0], :nuclei.shape[1]]
+            circle_mask = (xx - x)**2 + (yy - y)**2 <= radius**2
+            
+            # Расширяем только область этого ядра
+            expanded = circle_mask
+            
+            # Записываем с уникальной меткой
+            expanded_labels[expanded] = label_id
+        
+        # ---- Удаляем слишком маленькие объекты ----
+        expanded_labels = morphology.remove_small_objects(expanded_labels, min_size=min_macrophage_size)
+        
+        # ---- Дополнительно: удаляем слишком большие объекты ----
+        # Это помогает отсечь слипшиеся макрофаги
+        from scipy import ndimage
+        for label_id in range(1, np.max(expanded_labels) + 1):
+            mask = (expanded_labels == label_id)
+            size = np.sum(mask)
+            if size > max_macrophage_size:
+                expanded_labels[mask] = 0
+        
+        # ---- Перемаркируем ----
+        expanded_labels, _ = ndimage.label(expanded_labels > 0)
+        
+        # ---- Водораздел для разделения слипшихся областей ----
+        if np.max(expanded_labels) > 0:
+            distance = ndimage.distance_transform_edt(expanded_labels > 0)
+            markers = VesicleProcessor.find_peak_markers(distance, expanded_labels > 0, min_distance=5, threshold_rel=0.1)
+            if markers.max() == 0:
+                markers = measure.label(expanded_labels > 0)
+            labels = segmentation.watershed(-distance, markers, mask=expanded_labels > 0)
+            return labels
+        
+        return expanded_labels
+
+    @staticmethod
+    def analyze_colocalization(macrophage_labels, vesicles_binary_raw, vesicles_labeled):
+        """Анализирует колокализацию макрофагов с везикулами."""
+        total_macrophages = np.max(macrophage_labels) if macrophage_labels is not None else 0
+        if total_macrophages == 0:
+            return {
+                'total_macrophages': 0,
+                'macrophages_with_vesicles': 0,
+                'macrophage_colocalization_percent': 0.0,
+                'vesicles_in_macrophages': 0,
+                'mean_vesicles_per_macrophage': 0.0
+            }
+
+        macrophages_with_vesicles = 0
+        vesicle_labels_in_macrophages = set()
+
+        for label in range(1, total_macrophages + 1):
+            mask = (macrophage_labels == label)
+            if np.any(mask & vesicles_binary_raw):
+                macrophages_with_vesicles += 1
+                labels_in = np.unique(vesicles_labeled[mask])
+                labels_in = labels_in[labels_in > 0]
+                vesicle_labels_in_macrophages.update(labels_in)
+
+        vesicles_in_macrophages = len(vesicle_labels_in_macrophages)
+        percent = (macrophages_with_vesicles / total_macrophages) * 100 if total_macrophages else 0.0
+        mean_vesicles = vesicles_in_macrophages / total_macrophages if total_macrophages else 0.0
+
+        return {
+            'total_macrophages': total_macrophages,
+            'macrophages_with_vesicles': macrophages_with_vesicles,
+            'macrophage_colocalization_percent': percent,
+            'vesicles_in_macrophages': vesicles_in_macrophages,
+            'mean_vesicles_per_macrophage': mean_vesicles
+        }
+
+    @staticmethod
+    def draw_macrophages_on_composite(composite, macrophage_labels, color=(255, 165, 0), thickness=2):
+        """Рисует оранжевые контуры макрофагов на RGB-композите."""
+        if macrophage_labels is None or np.max(macrophage_labels) == 0:
+            return composite
+        overlay = composite.copy().astype(np.uint8)
+        props = measure.regionprops(macrophage_labels)
+        for prop in props:
+            y, x = prop.centroid
+            radius = int(np.sqrt(prop.area / np.pi)) + 2
+            # Используем cv2 – он уже импортирован в файле
+            cv2.circle(overlay, (int(x), int(y)), radius, color, thickness)
+        return overlay
