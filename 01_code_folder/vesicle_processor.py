@@ -1287,6 +1287,6 @@ class MacrophageProcessor:
         for prop in props:
             y, x = prop.centroid
             radius = int(np.sqrt(prop.area / np.pi)) + 2
-            # Используем cv2 – он уже импортирован в файле
+            # Используем cv2 
             cv2.circle(overlay, (int(x), int(y)), radius, color, thickness)
         return overlay

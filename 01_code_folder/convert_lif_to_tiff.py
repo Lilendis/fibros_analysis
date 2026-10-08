@@ -33,15 +33,15 @@ DEFAULT_OUTPUT_DIR = os.path.join(SCRIPT_DIR, "preprocessed")
 CHANNEL_ORDER = (0, 1, 2, 3)
 CHANNEL_LABELS = {
     0: "nuclei",
-    1: "collagen",
+    1: "autofluorescence",
     2: "vesicles",
-    3: "protein",
+    3: "marker",
 }
 CHANNEL_LABELS_RU = {
     0: "ядра",
-    1: "коллаген",
+    1: "аутофлюоресценция",
     2: "везикулы",
-    3: "белок",
+    3: "маркер",
 }
 
 
