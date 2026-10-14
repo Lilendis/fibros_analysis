@@ -6,23 +6,23 @@ NanoParticleAnalyzer processes raw microscopy data end-to-end: from LIF conversi
 
 ## Table of Contents
 
-- Features
-- Installation
-- Project Structure
-- Input Data
-- Usage
-  - Step 1. Convert LIF to TIFF
-  - Step 2. Launch the interactive application
-  - Step 3. Analyze a single sample
-  - Step 4. Run batch analysis
-- Processing Pipeline
-- Parameters
-- Output Data
-- Applications
-- Dependencies
-- Citation
-- License
-- Authors
+- [Features](#features)
+- [Installation](#installation)
+- [Project Structure](#project-structure)
+- [Input Data](#input-data)
+- [Usage](#usage)
+  - [Step 1. Convert LIF to TIFF](#step-1-convert-lif-to-tiff)
+  - [Step 2. Launch the interactive application](#step-2-launch-the-interactive-application)
+  - [Step 3. Analyze a single sample](#step-3-analyze-a-single-sample)
+  - [Step 4. Run batch analysis](#step-4-run-batch-analysis)
+- [Processing Pipeline](#processing-pipeline)
+- [Parameters](#parameters)
+- [Output Data](#output-data)
+- [Applications](#applications)
+- [Dependencies](#dependencies)
+- [Citation](#citation)
+- [License](#license)
+- [Authors](#authors)
 
 ## Features
 
